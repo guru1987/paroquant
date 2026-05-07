@@ -25,6 +25,11 @@ Models = "https://huggingface.co/collections/z-lab/paroquant"
 # `paroquant.cli.serve` shim solely for those side-effect imports.
 paroquant = "paroquant:register"
 
+[project.scripts]
+# CLI for transplanting a Qwen MTP head into paroquant checkpoints whose export
+# is missing the `mtp.*` weights (e.g. z-lab/Qwen3.6-27B-PARO).
+paroquant-inject-mtp = "paroquant.cli.inject_mtp:main"
+
 [project.optional-dependencies]
 transformers = [
     "torch>=2.8",
