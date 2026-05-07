@@ -1,20 +1,7 @@
-# ParoQuant — community fork
+# ParoQuant
 
-> [!IMPORTANT]
-> This is a community fork of [`z-lab/paroquant`](https://github.com/z-lab/paroquant)
-> with two patches needed to run paroquant Qwen3.6 / Qwen3.5 checkpoints under
-> tensor parallelism on consumer multi-GPU rigs (e.g. 2× RTX 3090). The patches
-> are upstream PR candidates — once merged, this fork stops being needed.
->
-> **Changes vs upstream** (see [`docs/CHANGES.md`](docs/CHANGES.md) for full detail):
-> - **vLLM tensor-parallel support.** Fixed shape mismatch in
->   `_rotation_weight_loader` for row-parallel layers (`o_proj`, `down_proj`).
->   `--tensor-parallel-size > 1` now loads cleanly. (commit *vllm: tensor-parallel-aware rotation weight loader*)
-> - **`vllm serve` auto-load.** Registered as `vllm.general_plugins` entry point
->   so vanilla `vllm serve <model>` works without the `paroquant.cli.serve` shim.
->   (commit *vllm: register as general plugin for auto-load via `vllm serve`*)
->
-> No model-side changes. Behaviour at TP=1 is identical to upstream `0.1.13`.
+> [!NOTE]
+> Community fork of [`z-lab/paroquant`](https://github.com/z-lab/paroquant) — adds vLLM tensor-parallel support, vanilla `vllm serve` integration, and an MTP-injection helper. Upstream PR pending: [z-lab/paroquant#41](https://github.com/z-lab/paroquant/pull/41). Technical detail: [`docs/CHANGES.md`](docs/CHANGES.md).
 
 **Pairwise Rotation Quantization for Efficient Reasoning LLM Inference**
 
@@ -59,14 +46,37 @@ python -m paroquant.cli.chat --model $MODEL
 ### OpenAI-Compatible API Server
 
 ```bash
-# After installing this fork, vanilla vLLM serve works directly:
-vllm serve $MODEL --port 8000
-
-# (The original wrapper still works for back-compat:)
-python -m paroquant.cli.serve --model $MODEL --port 8000
+vllm serve $MODEL --port 8000          # vanilla vLLM works directly in this fork
 ```
 
-For vLLM, the arguments are passed to vLLM directly. See [vLLM docs](https://docs.vllm.ai/en/latest/configuration/serve_args/) for more details.
+For multi-GPU, add `--tensor-parallel-size N`. On consumer Ampere (RTX 30xx/40xx) also add `--disable-custom-all-reduce` (vLLM bug, unrelated to paroquant). All other arguments pass through to vLLM — see [vLLM docs](https://docs.vllm.ai/en/latest/configuration/serve_args/).
+
+### Speculative decoding (MTP) for checkpoints missing the draft head
+
+Some paroquant checkpoints declare an MTP head in `config.json` but ship without the weights — e.g. `z-lab/Qwen3.6-27B-PARO`. Wire one in:
+
+```bash
+hf download z-lab/Qwen3.6-27B-PARO --local-dir ./Qwen3.6-27B-PARO
+hf download guru87/Qwen3.6-27B-MTP --local-dir ./Qwen3.6-27B-MTP
+
+paroquant-inject-mtp \
+    --paro     ./Qwen3.6-27B-PARO \
+    --mtp-from ./Qwen3.6-27B-MTP/mtp.safetensors \
+    --output   ./Qwen3.6-27B-PARO-MTP
+
+vllm serve ./Qwen3.6-27B-PARO-MTP \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 2}'
+```
+
+The MTP head is symlink-mounted on the upstream LM weights — no duplication, ~810 MB extra on disk, fully reversible. Verified ~580 tok/s sustained on 2× RTX 3090 at parallel=24 (1k-in/2k-out). See [`paroquant-inject-mtp --help`](paroquant/cli/inject_mtp.py) for full options.
+
+<details>
+<summary>Legacy serve wrapper (still works for back-compat)</summary>
+
+```bash
+python -m paroquant.cli.serve --model $MODEL --port 8000
+```
+</details>
 
 > [!NOTE]
 > On consumer Ampere cards (RTX 30xx/40xx), vLLM's custom all-reduce kernel
