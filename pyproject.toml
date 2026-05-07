@@ -23,7 +23,7 @@ Models = "https://huggingface.co/collections/z-lab/paroquant"
 # Lets vanilla `vllm serve` auto-import paroquant's rotation kernel and
 # quantization config at startup, so end users don't need the
 # `paroquant.cli.serve` shim solely for those side-effect imports.
-paroquant = "paroquant:register"
+paroquant = "paroquant.inference.backends.vllm:register"
 
 [project.scripts]
 # CLI for transplanting a Qwen MTP head into paroquant checkpoints whose export
