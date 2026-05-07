@@ -19,6 +19,12 @@ Homepage = "https://paroquant.z-lab.ai"
 Paper = "https://arxiv.org/abs/2511.10645"
 Models = "https://huggingface.co/collections/z-lab/paroquant"
 
+[project.entry-points."vllm.general_plugins"]
+# Lets vanilla `vllm serve` auto-import paroquant's rotation kernel and
+# quantization config at startup, so end users don't need the
+# `paroquant.cli.serve` shim solely for those side-effect imports.
+paroquant = "paroquant:register"
+
 [project.optional-dependencies]
 transformers = [
     "torch>=2.8",
