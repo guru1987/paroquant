@@ -1,4 +1,20 @@
-# ParoQuant
+# ParoQuant — community fork
+
+> [!IMPORTANT]
+> This is a community fork of [`z-lab/paroquant`](https://github.com/z-lab/paroquant)
+> with two patches needed to run paroquant Qwen3.6 / Qwen3.5 checkpoints under
+> tensor parallelism on consumer multi-GPU rigs (e.g. 2× RTX 3090). The patches
+> are upstream PR candidates — once merged, this fork stops being needed.
+>
+> **Changes vs upstream** (see [`docs/CHANGES.md`](docs/CHANGES.md) for full detail):
+> - **vLLM tensor-parallel support.** Fixed shape mismatch in
+>   `_rotation_weight_loader` for row-parallel layers (`o_proj`, `down_proj`).
+>   `--tensor-parallel-size > 1` now loads cleanly. (commit *vllm: tensor-parallel-aware rotation weight loader*)
+> - **`vllm serve` auto-load.** Registered as `vllm.general_plugins` entry point
+>   so vanilla `vllm serve <model>` works without the `paroquant.cli.serve` shim.
+>   (commit *vllm: register as general plugin for auto-load via `vllm serve`*)
+>
+> No model-side changes. Behaviour at TP=1 is identical to upstream `0.1.13`.
 
 **Pairwise Rotation Quantization for Efficient Reasoning LLM Inference**
 
@@ -43,10 +59,24 @@ python -m paroquant.cli.chat --model $MODEL
 ### OpenAI-Compatible API Server
 
 ```bash
+# After installing this fork, vanilla vLLM serve works directly:
+vllm serve $MODEL --port 8000
+
+# (The original wrapper still works for back-compat:)
 python -m paroquant.cli.serve --model $MODEL --port 8000
 ```
 
 For vLLM, the arguments are passed to vLLM directly. See [vLLM docs](https://docs.vllm.ai/en/latest/configuration/serve_args/) for more details.
+
+> [!NOTE]
+> On consumer Ampere cards (RTX 30xx/40xx), vLLM's custom all-reduce kernel
+> currently fails during CUDA-graph capture (unrelated to paroquant). Until
+> vLLM fixes this, launch with `--disable-custom-all-reduce` — NCCL fallback
+> is fast on PCIe-switch'd P2P. Example:
+>
+> ```bash
+> vllm serve $MODEL --tensor-parallel-size 2 --disable-custom-all-reduce
+> ```
 
 For MLX, add `--vlm` if you wish to load the VLM components and use the model's multimodal features. For vLLM, VLM components are loaded by default and can be skipped with the server argument `--language-model-only`.
 
