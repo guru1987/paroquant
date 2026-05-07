@@ -1,63 +1,51 @@
-# ParoQuant
+# ParoQuant — community fork
+
+**Pairwise Rotation Quantization for LLMs**, with multi-GPU and MTP fixes.
 
 > [!NOTE]
-> Community fork of [`z-lab/paroquant`](https://github.com/z-lab/paroquant) — adds vLLM tensor-parallel support, vanilla `vllm serve` integration, and an MTP-injection helper. Upstream PR pending: [z-lab/paroquant#41](https://github.com/z-lab/paroquant/pull/41). Technical detail: [`docs/CHANGES.md`](docs/CHANGES.md).
+> This is a community fork of [`z-lab/paroquant`](https://github.com/z-lab/paroquant).
+> If you don't need the changes below, use upstream. Otherwise this fork installs
+> alongside vanilla vLLM and works without any wrapper script.
+>
+> **Changes vs upstream** (full detail in [`docs/CHANGES.md`](docs/CHANGES.md)):
+> - vLLM tensor-parallel support — `--tensor-parallel-size > 1` no longer crashes on row-parallel layers
+> - vanilla `vllm serve <model>` works directly (auto-loaded as a `vllm.general_plugins` entry point — no `paroquant.cli.serve` shim needed)
+> - new `paroquant-inject-mtp` CLI to wire missing MTP draft heads into paroquant checkpoints that ship without them
+>
+> Upstream PR pending: [z-lab/paroquant#41](https://github.com/z-lab/paroquant/pull/41).
 
-**Pairwise Rotation Quantization for Efficient Reasoning LLM Inference**
-
-<p>
-  <a href="https://arxiv.org/abs/2511.10645"><img src="https://img.shields.io/badge/arXiv-2511.10645-b31b1b.svg" alt="Paper"></a>
-  <a href="https://paroquant.z-lab.ai"><img src="https://img.shields.io/badge/Blog-ParoQuant-blue" alt="Blog"></a>
-  <a href="https://huggingface.co/collections/z-lab/paroquant"><img src="https://img.shields.io/badge/%F0%9F%A4%97-Models-yellow" alt="Models"></a>
-  <a href="https://pypi.org/project/paroquant/"><img src="https://img.shields.io/pypi/v/paroquant" alt="PyPI"></a>
-</p>
-
-State-of-the-art INT4 quantization for LLMs. ParoQuant uses learned pairwise rotations to suppress weight outliers, closing the accuracy gap with FP16 while running at near-AWQ speed. Supports NVIDIA GPUs (vLLM, Transformers) and Apple Silicon (MLX).
-
-## Quick Start
-
-### Installation
+## Install
 
 ```bash
-# NVIDIA GPU (CUDA 12.9)
-pip install "paroquant[vllm]"
+pip install "vllm==0.19.1" "paroquant[vllm] @ git+https://github.com/guru1987/paroquant.git"
+```
 
-# NVIDIA GPU (CUDA 13.0)
-pip install "paroquant[vllm]" "vllm==0.19.1" \
+For CUDA 13.0 wheels, add the index URLs:
+```bash
+pip install "vllm==0.19.1" "paroquant[vllm] @ git+https://github.com/guru1987/paroquant.git" \
   --extra-index-url https://wheels.vllm.ai/0.19.1/cu130 \
   --extra-index-url https://download.pytorch.org/whl/cu130
-
-# Apple Silicon
-pip install "paroquant[mlx]"
 ```
 
-Pick a model from our [Hugging Face collection](https://huggingface.co/collections/z-lab/paroquant):
+## Run a model
 
 ```bash
-export MODEL=z-lab/Qwen3.5-4B-PARO
+hf download z-lab/Qwen3.6-27B-PARO --local-dir Qwen3.6-27B-PARO
+vllm serve ./Qwen3.6-27B-PARO --port 8000
 ```
 
-### Interactive Chat
+For multi-GPU add `--tensor-parallel-size N`. On consumer Ampere (RTX 30xx/40xx), also add `--disable-custom-all-reduce` (vLLM cudagraph-capture bug, unrelated to paroquant). All other args pass through to vLLM.
+
+## Speculative decoding (MTP) — fixing the missing draft head
+
+Most paroquant Qwen3.5/3.6 checkpoints declare an MTP draft head in `config.json` but ship **without the weights**. Speculative decoding with these checkpoints starts the drafter from random init → 0% acceptance, pure overhead.
+
+This fork ships `paroquant-inject-mtp` which transplants the official Qwen MTP head onto the paroquant base via a sharded-symlink layout (no LM weight duplication, ~tens-of-MiB-to-1-GiB extra on disk depending on size, fully reversible).
 
 ```bash
-python -m paroquant.cli.chat --model $MODEL
-```
-
-### OpenAI-Compatible API Server
-
-```bash
-vllm serve $MODEL --port 8000          # vanilla vLLM works directly in this fork
-```
-
-For multi-GPU, add `--tensor-parallel-size N`. On consumer Ampere (RTX 30xx/40xx) also add `--disable-custom-all-reduce` (vLLM bug, unrelated to paroquant). All other arguments pass through to vLLM — see [vLLM docs](https://docs.vllm.ai/en/latest/configuration/serve_args/).
-
-### Speculative decoding (MTP) for checkpoints missing the draft head
-
-Some paroquant checkpoints declare an MTP head in `config.json` but ship without the weights — e.g. `z-lab/Qwen3.6-27B-PARO`. Wire one in:
-
-```bash
-hf download z-lab/Qwen3.6-27B-PARO --local-dir ./Qwen3.6-27B-PARO
-hf download guru87/Qwen3.6-27B-MTP --local-dir ./Qwen3.6-27B-MTP
+# Pick a paroquant model (left column) + matching MTP head (right column)
+hf download z-lab/Qwen3.6-27B-PARO --local-dir Qwen3.6-27B-PARO
+hf download guru87/Qwen3.6-27B-MTP --local-dir Qwen3.6-27B-MTP
 
 paroquant-inject-mtp \
     --paro     ./Qwen3.6-27B-PARO \
@@ -65,129 +53,40 @@ paroquant-inject-mtp \
     --output   ./Qwen3.6-27B-PARO-MTP
 
 vllm serve ./Qwen3.6-27B-PARO-MTP \
+    --tensor-parallel-size 2 --disable-custom-all-reduce \
     --speculative-config '{"method": "mtp", "num_speculative_tokens": 2}'
 ```
 
-The MTP head is symlink-mounted on the upstream LM weights — no duplication, ~810 MB extra on disk, fully reversible. Verified ~580 tok/s sustained on 2× RTX 3090 at parallel=24 (1k-in/2k-out). See [`paroquant-inject-mtp --help`](paroquant/cli/inject_mtp.py) for full options.
+### MTP heads we publish
 
-<details>
-<summary>Legacy serve wrapper (still works for back-compat)</summary>
+Each is a single-file extraction from the official BF16 base model, byte-identical (verified by SHA256) to MTP weights shipped in other community quants. SHA256SUMS included for audit.
 
-```bash
-python -m paroquant.cli.serve --model $MODEL --port 8000
-```
-</details>
-
-> [!NOTE]
-> On consumer Ampere cards (RTX 30xx/40xx), vLLM's custom all-reduce kernel
-> currently fails during CUDA-graph capture (unrelated to paroquant). Until
-> vLLM fixes this, launch with `--disable-custom-all-reduce` — NCCL fallback
-> is fast on PCIe-switch'd P2P. Example:
->
-> ```bash
-> vllm serve $MODEL --tensor-parallel-size 2 --disable-custom-all-reduce
-> ```
-
-For MLX, add `--vlm` if you wish to load the VLM components and use the model's multimodal features. For vLLM, VLM components are loaded by default and can be skipped with the server argument `--language-model-only`.
-
-### Docker (NVIDIA GPU)
+| paroquant model                                                                                      | MTP head repo                                                                                  | size    |
+|------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|---------|
+| [`z-lab/Qwen3.5-0.8B-PARO`](https://huggingface.co/z-lab/Qwen3.5-0.8B-PARO)                          | [`guru87/Qwen3.5-0.8B-MTP`](https://huggingface.co/guru87/Qwen3.5-0.8B-MTP)                     | 39 MiB  |
+| [`z-lab/Qwen3.5-2B-PARO`](https://huggingface.co/z-lab/Qwen3.5-2B-PARO)                              | [`guru87/Qwen3.5-2B-MTP`](https://huggingface.co/guru87/Qwen3.5-2B-MTP)                         | 116 MiB |
+| [`z-lab/Qwen3.5-4B-PARO`](https://huggingface.co/z-lab/Qwen3.5-4B-PARO)                              | [`guru87/Qwen3.5-4B-MTP`](https://huggingface.co/guru87/Qwen3.5-4B-MTP)                         | 230 MiB |
+| [`z-lab/Qwen3.5-9B-PARO`](https://huggingface.co/z-lab/Qwen3.5-9B-PARO)                              | [`guru87/Qwen3.5-9B-MTP`](https://huggingface.co/guru87/Qwen3.5-9B-MTP)                         | 464 MiB |
+| [`z-lab/Qwen3.6-27B-PARO`](https://huggingface.co/z-lab/Qwen3.6-27B-PARO)                            | [`guru87/Qwen3.6-27B-MTP`](https://huggingface.co/guru87/Qwen3.6-27B-MTP)                       | 811 MiB |
 
 > [!NOTE]
-> The following commands map the local cache directory to the container in order to persist kernel cache across runs. Remove `-v ...` to disable this behaviour.
+> `z-lab/Qwen3.5-35B-A3B-PARO` (MoE) **doesn't work cleanly under TP > 1 in current paroquant** — it's not the MTP, the base model itself can't load: paroquant's plugin only registers a `LinearMethod`, not the `MoEMethodBase` that vLLM's `FusedMoE` expects for stacked-experts checkpoints. Tracked as a known limitation; needs upstream work in paroquant.
 
-```bash
-# Interactive chat
-docker run --pull=always --rm -it --gpus all --ipc=host \
-  -v $HOME/.cache/paroquant:/root/.cache/paroquant \
-  ghcr.io/z-lab/paroquant:chat --model $MODEL
+## What does each model size give you?
 
-# API server (port 8000)
-docker run --pull=always --rm -it --gpus all --ipc=host -p 8000:8000 \
-  -v $HOME/.cache/paroquant:/root/.cache/paroquant \
-  ghcr.io/z-lab/paroquant:serve --model $MODEL
-```
+Measured single-stream greedy on RTX 3090 with this fork + injected MTP, `num_speculative_tokens=2`:
 
-## Models
+| size  | tok/s | MTP accept | KV cache @ 8k context | minimum GPU |
+|-------|------:|-----------:|----------------------:|-------------|
+| 0.8B  |   212 |       54 % |              326 k tok | 1× 24 GB     |
+| 2B    |   191 |       55 % |                       | 1× 24 GB     |
+| 4B    |   171 |       75 % |                       | 1× 24 GB     |
+| 9B    |   120 |       72 % |                       | 1× 24 GB     |
+| 27B   |    75 |       73 % |                       | **2× 24 GB** |
 
-All models are available on [Hugging Face](https://huggingface.co/collections/z-lab/paroquant). Swap the model name in the commands above to try any of them.
+Concurrent load tested on the 27B at parallel=24, 1k-in / 2k-out → **580 tok/s sustained** with 82 % KV utilization (vs ~450 tok/s on Qwen3.6-27B-GPTQ-8bit at the same hardware/workload).
 
-**Gemma 4**
-
-| Model          | Checkpoint                                                                      |
-| -------------- | ------------------------------------------------------------------------------- |
-| gemma-4-31B-it | [`z-lab/gemma-4-31B-it-PARO`](https://huggingface.co/z-lab/gemma-4-31B-it-PARO) |
-| gemma-4-E2B-it | [`z-lab/gemma-4-E2B-it-PARO`](https://huggingface.co/z-lab/gemma-4-E2B-it-PARO) |
-
-**Qwen3.6**
-
-| Model       | Checkpoint                                                                |
-| ----------- | ------------------------------------------------------------------------- |
-| Qwen3.6-27B | [`z-lab/Qwen3.6-27B-PARO`](https://huggingface.co/z-lab/Qwen3.6-27B-PARO) |
-
-**Qwen3.5**
-
-| Model | Checkpoint |
-|---|---|
-| Qwen3.5-0.8B | [`z-lab/Qwen3.5-0.8B-PARO`](https://huggingface.co/z-lab/Qwen3.5-0.8B-PARO) |
-| Qwen3.5-2B | [`z-lab/Qwen3.5-2B-PARO`](https://huggingface.co/z-lab/Qwen3.5-2B-PARO) |
-| Qwen3.5-4B | [`z-lab/Qwen3.5-4B-PARO`](https://huggingface.co/z-lab/Qwen3.5-4B-PARO) |
-| Qwen3.5-9B | [`z-lab/Qwen3.5-9B-PARO`](https://huggingface.co/z-lab/Qwen3.5-9B-PARO) |
-| Qwen3.5-27B | [`z-lab/Qwen3.5-27B-PARO`](https://huggingface.co/z-lab/Qwen3.5-27B-PARO) |
-| Qwen3.5-35B-A3B | [`z-lab/Qwen3.5-35B-A3B-PARO`](https://huggingface.co/z-lab/Qwen3.5-35B-A3B-PARO) |
-
-**Qwen3**
-
-| Model | Checkpoint |
-|---|---|
-| Qwen3-0.6B | [`z-lab/Qwen3-0.6B-PARO`](https://huggingface.co/z-lab/Qwen3-0.6B-PARO) |
-| Qwen3-1.7B | [`z-lab/Qwen3-1.7B-PARO`](https://huggingface.co/z-lab/Qwen3-1.7B-PARO) |
-| Qwen3-4B | [`z-lab/Qwen3-4B-PARO`](https://huggingface.co/z-lab/Qwen3-4B-PARO) |
-| Qwen3-8B | [`z-lab/Qwen3-8B-PARO`](https://huggingface.co/z-lab/Qwen3-8B-PARO) |
-| Qwen3-14B | [`z-lab/Qwen3-14B-PARO`](https://huggingface.co/z-lab/Qwen3-14B-PARO) |
-
-**Llama**
-
-| Model | Checkpoint |
-|---|---|
-| Llama-2-7B | [`z-lab/Llama-2-7b-hf-PARO`](https://huggingface.co/z-lab/Llama-2-7b-hf-PARO) |
-| Llama-3-8B | [`z-lab/Meta-Llama-3-8B-PARO`](https://huggingface.co/z-lab/Meta-Llama-3-8B-PARO) |
-| Llama-3.1-8B-Instruct | [`z-lab/Llama-3.1-8B-Instruct-PARO`](https://huggingface.co/z-lab/Llama-3.1-8B-Instruct-PARO) |
-
-Want a model that's not listed? [Open an issue](https://github.com/z-lab/paroquant/issues/new) and let us know.
-
-## Reproduction
-
-> [!NOTE]
-> The main branch of this repository is under active development, and reproducibility is not guaranteed.
-> Please use the [`legacy`](https://github.com/z-lab/paroquant/tree/legacy) branch to reproduce results from the paper.
-
-## Quantize Your Own Model
-
-```bash
-git clone https://github.com/z-lab/paroquant && cd paroquant
-pip install -e ".[optim,eval]"
-
-# 1. Optimize rotation parameters
-experiments/optimize/4bit.sh Qwen/Qwen3-8B
-
-# 2. Export to HF checkpoint (--mode real for INT4, --mode pseudo for FP16)
-python -m paroquant.cli.convert \
-  --model Qwen/Qwen3-8B \
-  --result-dir output/Qwen3-8B \
-  --output-path models/Qwen3-8B-PARO
-```
-
-## Docker Images
-
-| Image | Purpose |
-|---|---|
-| `ghcr.io/z-lab/paroquant:chat` | Interactive chat |
-| `ghcr.io/z-lab/paroquant:chat-cu129` | Interactive chat (CUDA 12.9) |
-| `ghcr.io/z-lab/paroquant:serve` | OpenAI-compatible API server |
-| `ghcr.io/z-lab/paroquant:latest` | Optimization & evaluation |
-| `ghcr.io/z-lab/paroquant:eval` | Reasoning task evaluation |
-
-## Citation
+## Citation (upstream paper)
 
 ```bibtex
 @inproceedings{liang2026paroquant,
@@ -197,3 +96,15 @@ python -m paroquant.cli.convert \
   year      = {2026}
 }
 ```
+
+## License
+
+MIT, inherited from upstream paroquant. Models hosted on HuggingFace inherit Apache-2.0 from their respective Qwen base models.
+
+## Quantize your own model
+
+Out of scope for this fork — see [upstream's instructions](https://github.com/z-lab/paroquant#quantize-your-own-model). The fork only patches inference; the optimization/conversion path is unchanged.
+
+---
+
+**Authors:** [guru87](https://huggingface.co/guru87) ([GitHub: guru1987](https://github.com/guru1987)) and **Claude Opus 4.7** (Anthropic, 1M context). Diagnosis, patches, scripting, and docs were developed collaboratively over a single session in May 2026.
